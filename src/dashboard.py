@@ -15,8 +15,10 @@ from src.services.catalyst_service import (
     dashboard_summary,
     ensure_database,
     export_ranked_catalysts,
+    get_catalyst_detail,
     rank_catalyst_rows,
     top_coin_rows,
+    update_catalyst,
     update_coin_universe,
 )
 from src.utils.logging import configure_logging
@@ -62,6 +64,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if parsed.path == "/add-catalyst":
                 self._handle_add_catalyst(form)
                 return
+            if parsed.path == "/edit-catalyst":
+                self._handle_edit_catalyst(form)
+                return
             if parsed.path == "/export":
                 self._handle_export(form)
                 return
@@ -103,6 +108,28 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self._redirect(
             "/",
             notice=f"Added {result.symbol} catalyst with score {result.catalyst_score}.",
+            notice_type="success",
+        )
+
+    def _handle_edit_catalyst(self, form: dict[str, str]) -> None:
+        settings = get_settings()
+        source_credibility_raw = form.get("source_credibility", "").strip()
+        source_credibility = float(source_credibility_raw) if source_credibility_raw else None
+
+        result = update_catalyst(
+            settings=settings,
+            catalyst_id=int(form.get("catalyst_id", "")),
+            symbol=form.get("symbol", ""),
+            event_type=form.get("event_type", ""),
+            event_date=form.get("event_date", ""),
+            description=form.get("description", ""),
+            source_url=form.get("source_url", ""),
+            confidence_score=float(form.get("confidence_score", "")),
+            source_credibility=source_credibility,
+        )
+        self._redirect(
+            "/",
+            notice=f"Updated {result.symbol} catalyst with score {result.catalyst_score}.",
             notice_type="success",
         )
 
@@ -151,6 +178,7 @@ def render_dashboard(params: dict[str, list[str]]) -> str:
     coins = top_coin_rows(settings)
     notice = params.get("notice", [""])[0]
     notice_type = params.get("type", ["success"])[0]
+    edit_catalyst = selected_catalyst_for_edit(settings, params)
 
     return f"""<!doctype html>
 <html lang="en">
@@ -206,15 +234,16 @@ def render_dashboard(params: dict[str, list[str]]) -> str:
               <button type="submit" class="secondary">Export CSV</button>
             </form>
           </div>
+          <p class="score-note">Scores rank catalyst relevance and timing. They are not buy/sell signals.</p>
           {render_ranked_table(ranked_rows)}
         </section>
       </div>
 
       <aside class="side-column">
-        <section class="panel">
-          <p class="eyebrow">Manual entry</p>
-          <h2>Add catalyst</h2>
-          {render_add_form()}
+        <section class="panel" id="catalyst-form">
+          <p class="eyebrow">{"Edit catalyst" if edit_catalyst else "Manual entry"}</p>
+          <h2>{"Edit catalyst" if edit_catalyst else "Add catalyst"}</h2>
+          {render_edit_form(edit_catalyst) if edit_catalyst else render_add_form()}
         </section>
 
         <section class="panel">
@@ -237,11 +266,19 @@ def render_notice(notice: str, notice_type: str) -> str:
     return f'<div class="{css_class}" role="status">{escape(notice)}</div>'
 
 
+def selected_catalyst_for_edit(settings, params: dict[str, list[str]]) -> dict[str, object] | None:
+    edit_id = params.get("edit_id", [""])[0]
+    if not edit_id:
+        return None
+
+    try:
+        return get_catalyst_detail(settings, int(edit_id))
+    except ValueError:
+        return None
+
+
 def render_add_form() -> str:
     default_date = (date.today() + timedelta(days=14)).isoformat()
-    event_options = "\n".join(
-        f'<option value="{event.value}">{humanize(event.value)}</option>' for event in EventType
-    )
 
     return f"""<form class="stacked-form" method="post" action="/add-catalyst">
   <label>
@@ -251,7 +288,7 @@ def render_add_form() -> str:
   <label>
     <span>Event type</span>
     <select name="event_type" required>
-      {event_options}
+      {render_event_options("mainnet_upgrade")}
     </select>
   </label>
   <label>
@@ -260,7 +297,7 @@ def render_add_form() -> str:
   </label>
   <label>
     <span>Description</span>
-    <textarea name="description" rows="4" placeholder="Protocol upgrade target date" required></textarea>
+    <textarea name="description" rows="4" placeholder="Mainnet upgrade target date" required></textarea>
   </label>
   <label>
     <span>Source URL</span>
@@ -268,7 +305,7 @@ def render_add_form() -> str:
   </label>
   <div class="form-grid">
     <label>
-      <span>Confidence</span>
+      <span>Confidence (0–100)</span>
       <input type="number" name="confidence_score" min="0" max="100" step="0.01" placeholder="80" required>
     </label>
     <label>
@@ -278,6 +315,59 @@ def render_add_form() -> str:
   </div>
   <button type="submit" class="wide">Add Catalyst</button>
 </form>"""
+
+
+def render_edit_form(catalyst: dict[str, object]) -> str:
+    return f"""<form class="stacked-form" method="post" action="/edit-catalyst">
+  <input type="hidden" name="catalyst_id" value="{attr(catalyst["id"])}">
+  <label>
+    <span>Symbol</span>
+    <input name="symbol" value="{attr(catalyst["symbol"])}" required>
+  </label>
+  <label>
+    <span>Event type</span>
+    <select name="event_type" required>
+      {render_event_options(str(catalyst["event_type"]))}
+    </select>
+  </label>
+  <label>
+    <span>Event date</span>
+    <input type="date" name="event_date" value="{attr(catalyst["event_date"])}" required>
+  </label>
+  <label>
+    <span>Description</span>
+    <textarea name="description" rows="4" placeholder="Mainnet upgrade target date" required>{escape(str(catalyst["description"]))}</textarea>
+  </label>
+  <label>
+    <span>Source URL</span>
+    <input type="url" name="source_url" value="{attr(catalyst["source_url"])}" required>
+  </label>
+  <div class="form-grid">
+    <label>
+      <span>Confidence (0–100)</span>
+      <input type="number" name="confidence_score" min="0" max="100" step="0.01" value="{attr(format_form_score(catalyst["confidence_score"]))}" required>
+    </label>
+    <label>
+      <span>Source override</span>
+      <input type="number" name="source_credibility" min="0" max="100" step="0.01" value="{attr(format_form_score(catalyst["source_credibility"]))}">
+    </label>
+  </div>
+  <div class="form-actions">
+    <button type="submit">Save Changes</button>
+    <a class="button secondary" href="/">Cancel</a>
+  </div>
+</form>"""
+
+
+def render_event_options(selected: str) -> str:
+    return "\n".join(
+        f'<option value="{event.value}"{option_selected(event.value, selected)}>{humanize(event.value)}</option>'
+        for event in EventType
+    )
+
+
+def option_selected(value: str, selected: str) -> str:
+    return " selected" if value == selected else ""
 
 
 def render_ranked_table(rows: list[dict[str, object]]) -> str:
@@ -293,8 +383,9 @@ def render_ranked_table(rows: list[dict[str, object]]) -> str:
   <td>{escape(humanize(str(row["event_type"])))}</td>
   <td>{escape(str(row["event_date"]))}<span>{row["days_until_event"]} days</span></td>
   <td>{escape(str(row["description"]))}<a href="{escape(str(row["source_url"]))}" target="_blank" rel="noreferrer">Source</a></td>
-  <td>{format_percent(row["confidence_score"])}</td>
+  <td>{format_unit_score_100(row["confidence_score"])}</td>
   <td><span class="score">{row["catalyst_score"]}</span></td>
+  <td><a class="text-link" href="/?edit_id={row["catalyst_id"]}#catalyst-form">Edit</a></td>
 </tr>"""
         for row in rows
     )
@@ -307,8 +398,9 @@ def render_ranked_table(rows: list[dict[str, object]]) -> str:
         <th>Event</th>
         <th>Date</th>
         <th>Description</th>
-        <th>Confidence</th>
+        <th>Confidence (0–100)</th>
         <th>Score</th>
+        <th>Action</th>
       </tr>
     </thead>
     <tbody>
@@ -345,9 +437,24 @@ def humanize(value: str) -> str:
     return value.replace("_", " ").title()
 
 
-def format_percent(value: object) -> str:
+def attr(value: object) -> str:
+    return escape(str(value), quote=True)
+
+
+def format_form_score(value: object) -> str:
     try:
-        return f"{float(value) * 100:.0f}%"
+        score = float(value) * 100
+    except (TypeError, ValueError):
+        return ""
+
+    if score.is_integer():
+        return str(int(score))
+    return f"{score:.2f}".rstrip("0").rstrip(".")
+
+
+def format_unit_score_100(value: object) -> str:
+    try:
+        return f"{float(value) * 100:.0f}"
     except (TypeError, ValueError):
         return "-"
 
@@ -526,6 +633,12 @@ td span,
   margin-bottom: 14px;
 }
 
+.score-note {
+  margin: -4px 0 14px;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
 button,
 .button {
   min-height: 40px;
@@ -612,6 +725,12 @@ label span {
   gap: 10px;
 }
 
+.form-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
 .notice {
   margin-bottom: 18px;
   border-radius: 8px;
@@ -672,6 +791,16 @@ td a {
   color: var(--accent);
   font-weight: 800;
   text-decoration: none;
+}
+
+.text-link {
+  color: var(--accent);
+  font-weight: 900;
+  text-decoration: none;
+}
+
+.text-link:hover {
+  text-decoration: underline;
 }
 
 tbody tr:last-child td {

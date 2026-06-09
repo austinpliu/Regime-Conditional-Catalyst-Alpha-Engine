@@ -101,16 +101,7 @@ def add_catalyst(
     )
 
     with session_scope(settings.database_url) as session:
-        coin = session.execute(
-            select(Coin)
-            .where(func.upper(Coin.symbol) == catalyst_input.coin_symbol)
-            .order_by(Coin.cmc_rank.is_(None), Coin.cmc_rank)
-        ).scalars().first()
-
-        if coin is None:
-            raise ValueError(
-                f"No coin found for symbol {catalyst_input.coin_symbol}. Update the coin universe first."
-            )
+        coin = _find_coin_by_symbol(session, catalyst_input.coin_symbol)
 
         catalyst = Catalyst(
             coin_id=coin.id,
@@ -138,6 +129,91 @@ def add_catalyst(
             project_name=coin.name,
             catalyst_score=score,
         )
+
+
+def update_catalyst(
+    settings: Settings,
+    catalyst_id: int,
+    symbol: str,
+    event_type: str,
+    event_date: str | date,
+    description: str,
+    source_url: str,
+    confidence_score: float,
+    source_credibility: float | None = None,
+) -> CatalystAddResult:
+    ensure_database(settings)
+
+    parsed_event_date = date.fromisoformat(event_date) if isinstance(event_date, str) else event_date
+    inferred_source_credibility = estimate_source_credibility(source_url)
+    catalyst_input = CatalystCreate(
+        coin_symbol=symbol,
+        event_type=EventType(event_type),
+        event_date=parsed_event_date,
+        description=description,
+        source_url=source_url,
+        confidence_score=confidence_score,
+        source_credibility=source_credibility if source_credibility is not None else inferred_source_credibility,
+    )
+
+    with session_scope(settings.database_url) as session:
+        catalyst = session.execute(
+            select(Catalyst).where(Catalyst.id == catalyst_id)
+        ).scalar_one_or_none()
+        if catalyst is None:
+            raise ValueError(f"No catalyst found with id {catalyst_id}.")
+
+        coin = _find_coin_by_symbol(session, catalyst_input.coin_symbol)
+
+        catalyst.coin_id = coin.id
+        catalyst.event_type = catalyst_input.event_type.value
+        catalyst.event_date = catalyst_input.event_date
+        catalyst.description = catalyst_input.description
+        catalyst.source_url = catalyst_input.source_url
+        catalyst.confidence_score = catalyst_input.confidence_score
+        catalyst.source_credibility = catalyst_input.source_credibility
+        session.flush()
+
+        score = calculate_catalyst_score(
+            event_type=catalyst.event_type,
+            source_credibility=catalyst.source_credibility,
+            days_until=days_until_event(catalyst.event_date),
+            confidence_score=catalyst.confidence_score,
+            window_days=settings.ranking_window_days,
+        )
+
+        return CatalystAddResult(
+            catalyst_id=catalyst.id,
+            symbol=coin.symbol,
+            project_name=coin.name,
+            catalyst_score=score,
+        )
+
+
+def get_catalyst_detail(settings: Settings, catalyst_id: int) -> dict[str, object] | None:
+    ensure_database(settings)
+
+    with session_scope(settings.database_url) as session:
+        catalyst = session.execute(
+            select(Catalyst)
+            .options(joinedload(Catalyst.coin))
+            .where(Catalyst.id == catalyst_id)
+        ).scalar_one_or_none()
+
+        if catalyst is None:
+            return None
+
+        return {
+            "id": catalyst.id,
+            "symbol": catalyst.coin.symbol,
+            "project_name": catalyst.coin.name,
+            "event_type": catalyst.event_type,
+            "event_date": catalyst.event_date.isoformat(),
+            "description": catalyst.description,
+            "source_url": catalyst.source_url,
+            "confidence_score": catalyst.confidence_score,
+            "source_credibility": catalyst.source_credibility,
+        }
 
 
 def dashboard_summary(settings: Settings, days: int | None = None) -> dict[str, int]:
@@ -213,6 +289,7 @@ def rank_catalyst_rows(settings: Settings, days: int | None = None) -> list[dict
                 {
                     "symbol": catalyst.coin.symbol,
                     "project_name": catalyst.coin.name,
+                    "catalyst_id": catalyst.id,
                     "event_type": catalyst.event_type,
                     "event_date": catalyst.event_date.isoformat(),
                     "days_until_event": days_until,
@@ -235,3 +312,16 @@ def export_ranked_catalysts(settings: Settings, days: int | None = None, output:
     frame = pd.DataFrame(rank_catalyst_rows(settings, days=days), columns=CSV_COLUMNS)
     frame.to_csv(output_path, index=False)
     return output_path
+
+
+def _find_coin_by_symbol(session, symbol: str) -> Coin:
+    coin = session.execute(
+        select(Coin)
+        .where(func.upper(Coin.symbol) == symbol.upper())
+        .order_by(Coin.cmc_rank.is_(None), Coin.cmc_rank)
+    ).scalars().first()
+
+    if coin is None:
+        raise ValueError(f"No coin found for symbol {symbol.upper()}. Update the coin universe first.")
+
+    return coin
