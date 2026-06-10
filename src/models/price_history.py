@@ -13,9 +13,10 @@ class PriceHistory(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     symbol: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    coingecko_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
-    close_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
-    volume_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    price_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    volume_24h_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
     market_cap_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     __table_args__ = (UniqueConstraint("symbol", "date", name="uq_price_history_symbol_date"),)

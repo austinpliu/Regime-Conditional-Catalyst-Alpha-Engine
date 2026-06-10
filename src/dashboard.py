@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import subprocess
+import sys
 from datetime import date, timedelta
 from html import escape
 from http import HTTPStatus
@@ -18,6 +20,7 @@ from src.services.catalyst_service import (
     get_catalyst_detail,
     market_overview,
     market_timeseries,
+    price_history_status,
     rank_catalyst_rows,
     top_market_cap_snapshot_rows,
     top_coin_rows,
@@ -72,6 +75,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/export":
                 self._handle_export(form)
+                return
+            if parsed.path == "/backfill-history":
+                self._handle_backfill_history(form)
                 return
 
             self.send_error(HTTPStatus.NOT_FOUND, "Not found")
@@ -140,6 +146,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
         output_path = export_ranked_catalysts(settings, days=days)
         self._redirect("/", notice=f"Exported ranked CSV to {output_path}.", notice_type="success")
 
+    def _handle_backfill_history(self, form: dict[str, str]) -> None:
+        mode = form.get("mode", "refresh")
+        script = Path(__file__).resolve().parents[1] / "scripts" / "backfill_price_history.py"
+        args = [sys.executable, str(script)]
+        if mode == "refresh":
+            args.append("--refresh")
+        subprocess.Popen(args, start_new_session=True)
+        label = "3-day refresh" if mode == "refresh" else "full backfill"
+        self._redirect("/", notice=f"Price history {label} started in background.", notice_type="success")
+
     def _send_download(self) -> None:
         settings = get_settings()
         output_path = export_ranked_catalysts(settings)
@@ -180,6 +196,7 @@ def render_dashboard(params: dict[str, list[str]]) -> str:
     market_series = market_timeseries(settings)
     ranked_rows = rank_catalyst_rows(settings)
     coins = top_coin_rows(settings)
+    cg_status = price_history_status(settings)
     notice = params.get("notice", [""])[0]
     notice_type = params.get("type", ["success"])[0]
     edit_catalyst = selected_catalyst_for_edit(settings, params)
@@ -216,6 +233,10 @@ def render_dashboard(params: dict[str, list[str]]) -> str:
           <a href="#ranked-catalysts"><span class="nav-icon">&#9889;</span>Catalysts</a>
           <a href="#market-overview"><span class="nav-icon">&#9650;</span>Market</a>
           <a href="#catalyst-form"><span class="nav-icon">&#43;</span>Add Catalyst</a>
+        </nav>
+        <p class="nav-section-label">DATA</p>
+        <nav class="nav-list">
+          <a href="#coingecko-panel"><span class="nav-icon">&#9698;</span>Price History</a>
         </nav>
         <p class="nav-section-label">GENERAL</p>
         <nav class="nav-list">
@@ -318,6 +339,8 @@ def render_dashboard(params: dict[str, list[str]]) -> str:
             <h2>Add Catalyst</h2>
             {render_add_form()}
           </section>
+
+          {render_coingecko_panel(cg_status)}
 
           <section class="panel">
             <div class="section-heading">
@@ -662,6 +685,54 @@ def render_coin_list(coins: list[dict[str, object]]) -> str:
         for coin in coins
     )
     return f'<ul class="coin-list">{items}</ul>'
+
+
+def render_coingecko_panel(status: dict[str, object]) -> str:
+    api_key_configured = bool(status["api_key_configured"])
+    coins_with_history = int(status["coins_with_history"])
+    last_backfilled = status["last_backfilled"]
+    total_rows = int(status["total_rows"])
+
+    key_badge_class = "cg-key-ok" if api_key_configured else "cg-key-missing"
+    key_label = "API key set" if api_key_configured else "No API key"
+    key_hint = "" if api_key_configured else '<p class="cg-hint">Add <code>COINGECKO_API_KEY=your_key</code> to <code>.env</code> to unlock higher rate limits.</p>'
+
+    last_date = str(last_backfilled) if last_backfilled else "Never"
+
+    return f"""<section class="panel" id="coingecko-panel">
+  <div class="section-heading">
+    <div>
+      <p class="eyebrow">Market data</p>
+      <h2>Price History</h2>
+    </div>
+    <span class="cg-key-badge {key_badge_class}">{key_label}</span>
+  </div>
+  {key_hint}
+  <div class="cg-stats">
+    <div class="cg-stat">
+      <span>Coins with history</span>
+      <strong>{coins_with_history}</strong>
+    </div>
+    <div class="cg-stat">
+      <span>Total daily rows</span>
+      <strong>{format_number(total_rows)}</strong>
+    </div>
+    <div class="cg-stat cg-stat-wide">
+      <span>Last backfilled</span>
+      <strong>{last_date}</strong>
+    </div>
+  </div>
+  <div class="cg-actions">
+    <form method="post" action="/backfill-history" class="inline-form">
+      <input type="hidden" name="mode" value="refresh">
+      <button type="submit">&#8635; Refresh (3d)</button>
+    </form>
+    <form method="post" action="/backfill-history" class="inline-form">
+      <input type="hidden" name="mode" value="full">
+      <button type="submit" class="secondary">Full Backfill</button>
+    </form>
+  </div>
+</section>"""
 
 
 def render_pct_colored(value: object) -> str:
@@ -1800,6 +1871,100 @@ textarea:focus {
 .empty-state.compact {
   padding: 18px 16px;
   margin-top: 10px;
+}
+
+/* ─── COINGECKO PANEL ────────────────────────────── */
+
+.cg-key-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border-radius: 20px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.cg-key-badge::before {
+  content: "●";
+  font-size: 0.42rem;
+}
+
+.cg-key-ok {
+  background: #dcfce7;
+  color: #15803d;
+}
+
+.cg-key-missing {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.cg-hint {
+  margin: -4px 0 12px;
+  font-size: 0.77rem;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.cg-hint code {
+  background: #f0f4f0;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  color: var(--ink);
+  font-family: "SF Mono", "Fira Code", ui-monospace, monospace;
+}
+
+.cg-stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.cg-stat {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  background: #fafbfa;
+}
+
+.cg-stat-wide {
+  grid-column: 1 / -1;
+}
+
+.cg-stat span {
+  display: block;
+  font-size: 0.72rem;
+  color: var(--muted);
+  font-weight: 600;
+  margin-bottom: 3px;
+}
+
+.cg-stat strong {
+  display: block;
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--ink);
+  letter-spacing: -0.01em;
+}
+
+.cg-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.cg-actions .inline-form {
+  flex: 1;
+  min-width: 0;
+}
+
+.cg-actions button {
+  width: 100%;
 }
 
 /* ─── RESPONSIVE ─────────────────────────────────── */

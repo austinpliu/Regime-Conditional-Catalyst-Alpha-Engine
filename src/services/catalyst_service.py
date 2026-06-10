@@ -16,12 +16,15 @@ from src.models.market_snapshot import MarketSnapshot
 from src.models.price_history import PriceHistory
 from src.scoring.catalyst_score import calculate_catalyst_score, days_until_event, estimate_source_credibility
 from src.scoring.market_reaction import (
+    DailyPricePoint,
+    HistoryReactionMetrics,
+    MarketReactionMetrics,
     MarketSnapshotPoint,
     adjusted_opportunity_score,
     calculate_market_reaction,
+    calculate_market_reaction_from_history,
     calculate_priced_in_penalty,
 )
-from src.scoring.quant_metrics import PriceRow, calculate_quant_metrics
 from src.storage.db import init_db, session_scope
 
 
@@ -35,14 +38,31 @@ CSV_COLUMNS = [
     "source_url",
     "confidence_score",
     "catalyst_score",
+    # Returns — present in both paths
+    "return_1d_pct",
+    "return_3d_pct",
     "return_7d_pct",
     "return_14d_pct",
     "return_30d_pct",
+    # Benchmark-adjusted returns (history path)
+    "btc_adjusted_return_7d_pct",
+    "btc_adjusted_return_30d_pct",
+    "eth_adjusted_return_7d_pct",
+    "eth_adjusted_return_30d_pct",
+    # Legacy benchmark names (snapshot fallback; also populated from history for dashboard compat)
     "volume_change_pct",
     "btc_relative_return_pct",
     "eth_relative_return_pct",
+    # Scoring
     "priced_in_penalty",
     "adjusted_score",
+    # Quant metrics — history path
+    "volume_z_score",
+    "realized_vol_7d_pct",
+    "realized_vol_30d_pct",
+    "volatility_ratio",
+    "ma20_distance_pct",
+    # Legacy quant column names (dashboard compat; mapped from history metrics)
     "realized_vol_7d",
     "realized_vol_30d",
     "volume_z_score_30d",
@@ -384,8 +404,11 @@ def rank_catalyst_rows(settings: Settings, days: int | None = None) -> list[dict
         snapshot_cache: dict[str, list[MarketSnapshotPoint]] = {}
         btc_snapshots = _snapshot_points_for_symbol(session, "BTC", snapshot_cache)
         eth_snapshots = _snapshot_points_for_symbol(session, "ETH", snapshot_cache)
-        quant_cache: dict[str, list[PriceRow]] = {}
-        btc_price_rows = _price_history_rows_for_symbol(session, "BTC", quant_cache)
+
+        history_cache: dict[str, list[DailyPricePoint]] = {}
+        btc_history = _daily_price_points_for_symbol(session, "BTC", history_cache)
+        eth_history = _daily_price_points_for_symbol(session, "ETH", history_cache)
+
         rows = []
         for catalyst in catalysts:
             days_until = days_until_event(catalyst.event_date, as_of=today)
@@ -396,43 +419,41 @@ def rank_catalyst_rows(settings: Settings, days: int | None = None) -> list[dict
                 confidence_score=catalyst.confidence_score,
                 window_days=window_days,
             )
-            coin_snapshots = _snapshot_points_for_symbol(session, catalyst.coin.symbol, snapshot_cache)
-            reaction = calculate_market_reaction(
-                coin_snapshots=coin_snapshots,
-                btc_snapshots=btc_snapshots,
-                eth_snapshots=eth_snapshots,
-            )
-            priced_in_penalty = calculate_priced_in_penalty(reaction, days_until_event=days_until)
-            adjusted_score = adjusted_opportunity_score(catalyst_score, priced_in_penalty)
-            coin_price_rows = _price_history_rows_for_symbol(session, catalyst.coin.symbol, quant_cache)
-            quant = calculate_quant_metrics(coin_price_rows, btc_rows=btc_price_rows)
-            rows.append(
-                {
-                    "symbol": catalyst.coin.symbol,
-                    "project_name": catalyst.coin.name,
-                    "catalyst_id": catalyst.id,
-                    "event_type": catalyst.event_type,
-                    "event_date": catalyst.event_date.isoformat(),
-                    "days_until_event": days_until,
-                    "description": catalyst.description,
-                    "source_url": catalyst.source_url,
-                    "confidence_score": round(catalyst.confidence_score, 4),
-                    "catalyst_score": catalyst_score,
-                    "return_7d_pct": _round_optional(reaction.return_7d_pct),
-                    "return_14d_pct": _round_optional(reaction.return_14d_pct),
-                    "return_30d_pct": _round_optional(reaction.return_30d_pct),
-                    "volume_change_pct": _round_optional(reaction.volume_change_pct),
-                    "btc_relative_return_pct": _round_optional(reaction.btc_relative_return_pct),
-                    "eth_relative_return_pct": _round_optional(reaction.eth_relative_return_pct),
-                    "priced_in_penalty": priced_in_penalty,
-                    "adjusted_score": adjusted_score,
-                    "realized_vol_7d": _round_optional(quant.realized_vol_7d),
-                    "realized_vol_30d": _round_optional(quant.realized_vol_30d),
-                    "volume_z_score_30d": _round_optional(quant.volume_z_score_30d),
-                    "ma_20d_distance_pct": _round_optional(quant.ma_20d_distance_pct),
-                    "btc_correlation_30d": _round_optional(quant.btc_correlation_30d),
-                }
-            )
+
+            coin_history = _daily_price_points_for_symbol(session, catalyst.coin.symbol, history_cache)
+
+            if coin_history:
+                history_metrics = calculate_market_reaction_from_history(
+                    coin_history, btc_history, eth_history
+                )
+                compat_metrics = MarketReactionMetrics(
+                    return_7d_pct=history_metrics.return_7d_pct,
+                    return_14d_pct=history_metrics.return_14d_pct,
+                    return_30d_pct=history_metrics.return_30d_pct,
+                    volume_change_pct=None,
+                    btc_relative_return_pct=history_metrics.btc_adjusted_return_30d_pct,
+                    eth_relative_return_pct=history_metrics.eth_adjusted_return_30d_pct,
+                )
+                priced_in_penalty = calculate_priced_in_penalty(
+                    compat_metrics,
+                    days_until_event=days_until,
+                    volume_z_score=history_metrics.volume_z_score,
+                    volatility_ratio=history_metrics.volatility_ratio,
+                )
+                adjusted_score = adjusted_opportunity_score(catalyst_score, priced_in_penalty)
+                row = _history_row(catalyst, days_until, catalyst_score, priced_in_penalty, adjusted_score, history_metrics)
+            else:
+                coin_snapshots = _snapshot_points_for_symbol(session, catalyst.coin.symbol, snapshot_cache)
+                reaction = calculate_market_reaction(
+                    coin_snapshots=coin_snapshots,
+                    btc_snapshots=btc_snapshots,
+                    eth_snapshots=eth_snapshots,
+                )
+                priced_in_penalty = calculate_priced_in_penalty(reaction, days_until_event=days_until)
+                adjusted_score = adjusted_opportunity_score(catalyst_score, priced_in_penalty)
+                row = _snapshot_row(catalyst, days_until, catalyst_score, priced_in_penalty, adjusted_score, reaction)
+
+            rows.append(row)
 
     return sorted(rows, key=lambda row: (-float(row["adjusted_score"]), str(row["event_date"])))
 
@@ -447,6 +468,113 @@ def export_ranked_catalysts(settings: Settings, days: int | None = None, output:
     frame.to_csv(output_path, index=False)
     return output_path
 
+
+# ─── Row builders ──────────────────────────────────────────────────────────────
+
+def _history_row(
+    catalyst,
+    days_until: int,
+    catalyst_score: float,
+    priced_in_penalty: float,
+    adjusted_score: float,
+    hrm: HistoryReactionMetrics,
+) -> dict[str, object]:
+    return {
+        "symbol": catalyst.coin.symbol,
+        "project_name": catalyst.coin.name,
+        "catalyst_id": catalyst.id,
+        "event_type": catalyst.event_type,
+        "event_date": catalyst.event_date.isoformat(),
+        "days_until_event": days_until,
+        "description": catalyst.description,
+        "source_url": catalyst.source_url,
+        "confidence_score": round(catalyst.confidence_score, 4),
+        "catalyst_score": catalyst_score,
+        # Returns
+        "return_1d_pct": _round_optional(hrm.return_1d_pct),
+        "return_3d_pct": _round_optional(hrm.return_3d_pct),
+        "return_7d_pct": _round_optional(hrm.return_7d_pct),
+        "return_14d_pct": _round_optional(hrm.return_14d_pct),
+        "return_30d_pct": _round_optional(hrm.return_30d_pct),
+        # Benchmark-adjusted (new names)
+        "btc_adjusted_return_7d_pct": _round_optional(hrm.btc_adjusted_return_7d_pct),
+        "btc_adjusted_return_30d_pct": _round_optional(hrm.btc_adjusted_return_30d_pct),
+        "eth_adjusted_return_7d_pct": _round_optional(hrm.eth_adjusted_return_7d_pct),
+        "eth_adjusted_return_30d_pct": _round_optional(hrm.eth_adjusted_return_30d_pct),
+        # Legacy names (dashboard compat)
+        "volume_change_pct": None,
+        "btc_relative_return_pct": _round_optional(hrm.btc_adjusted_return_30d_pct),
+        "eth_relative_return_pct": _round_optional(hrm.eth_adjusted_return_30d_pct),
+        # Scoring
+        "priced_in_penalty": priced_in_penalty,
+        "adjusted_score": adjusted_score,
+        # Quant (new names)
+        "volume_z_score": _round_optional(hrm.volume_z_score),
+        "realized_vol_7d_pct": _round_optional(hrm.realized_vol_7d_pct),
+        "realized_vol_30d_pct": _round_optional(hrm.realized_vol_30d_pct),
+        "volatility_ratio": _round_optional(hrm.volatility_ratio),
+        "ma20_distance_pct": _round_optional(hrm.ma20_distance_pct),
+        # Legacy quant names (dashboard compat)
+        "realized_vol_7d": _round_optional(hrm.realized_vol_7d_pct),
+        "realized_vol_30d": _round_optional(hrm.realized_vol_30d_pct),
+        "volume_z_score_30d": _round_optional(hrm.volume_z_score),
+        "ma_20d_distance_pct": _round_optional(hrm.ma20_distance_pct),
+        "btc_correlation_30d": None,
+    }
+
+
+def _snapshot_row(
+    catalyst,
+    days_until: int,
+    catalyst_score: float,
+    priced_in_penalty: float,
+    adjusted_score: float,
+    reaction: MarketReactionMetrics,
+) -> dict[str, object]:
+    return {
+        "symbol": catalyst.coin.symbol,
+        "project_name": catalyst.coin.name,
+        "catalyst_id": catalyst.id,
+        "event_type": catalyst.event_type,
+        "event_date": catalyst.event_date.isoformat(),
+        "days_until_event": days_until,
+        "description": catalyst.description,
+        "source_url": catalyst.source_url,
+        "confidence_score": round(catalyst.confidence_score, 4),
+        "catalyst_score": catalyst_score,
+        # Returns
+        "return_1d_pct": None,
+        "return_3d_pct": None,
+        "return_7d_pct": _round_optional(reaction.return_7d_pct),
+        "return_14d_pct": _round_optional(reaction.return_14d_pct),
+        "return_30d_pct": _round_optional(reaction.return_30d_pct),
+        # Benchmark-adjusted (new names — None for snapshot path)
+        "btc_adjusted_return_7d_pct": None,
+        "btc_adjusted_return_30d_pct": _round_optional(reaction.btc_relative_return_pct),
+        "eth_adjusted_return_7d_pct": None,
+        "eth_adjusted_return_30d_pct": _round_optional(reaction.eth_relative_return_pct),
+        # Legacy names
+        "volume_change_pct": _round_optional(reaction.volume_change_pct),
+        "btc_relative_return_pct": _round_optional(reaction.btc_relative_return_pct),
+        "eth_relative_return_pct": _round_optional(reaction.eth_relative_return_pct),
+        # Scoring
+        "priced_in_penalty": priced_in_penalty,
+        "adjusted_score": adjusted_score,
+        # Quant — all None (no daily history)
+        "volume_z_score": None,
+        "realized_vol_7d_pct": None,
+        "realized_vol_30d_pct": None,
+        "volatility_ratio": None,
+        "ma20_distance_pct": None,
+        "realized_vol_7d": None,
+        "realized_vol_30d": None,
+        "volume_z_score_30d": None,
+        "ma_20d_distance_pct": None,
+        "btc_correlation_30d": None,
+    }
+
+
+# ─── DB helpers ────────────────────────────────────────────────────────────────
 
 def _find_coin_by_symbol(session, symbol: str) -> Coin:
     coin = session.execute(
@@ -488,11 +616,11 @@ def _snapshot_points_for_symbol(
     return points
 
 
-def _price_history_rows_for_symbol(
+def _daily_price_points_for_symbol(
     session,
     symbol: str,
-    cache: dict[str, list[PriceRow]],
-) -> list[PriceRow]:
+    cache: dict[str, list[DailyPricePoint]],
+) -> list[DailyPricePoint]:
     normalized = symbol.upper()
     if normalized in cache:
         return cache[normalized]
@@ -504,7 +632,11 @@ def _price_history_rows_for_symbol(
     ).scalars().all()
 
     points = [
-        PriceRow(date=row.date, close_usd=row.close_usd, volume_usd=row.volume_usd)
+        DailyPricePoint(
+            date=row.date,
+            price_usd=row.price_usd,
+            volume_24h_usd=row.volume_24h_usd,
+        )
         for row in rows
     ]
     cache[normalized] = points
@@ -520,6 +652,26 @@ def _latest_snapshots_by_symbol(session) -> dict[str, MarketSnapshot]:
     for snapshot in snapshots:
         latest_by_symbol[snapshot.symbol.upper()] = snapshot
     return latest_by_symbol
+
+
+def price_history_status(settings: Settings) -> dict[str, object]:
+    ensure_database(settings)
+    with session_scope(settings.database_url) as session:
+        coins_with_history = session.scalar(
+            select(func.count(func.distinct(PriceHistory.symbol)))
+        ) or 0
+        last_backfilled = session.scalar(
+            select(func.max(PriceHistory.date))
+        )
+        total_rows = session.scalar(
+            select(func.count(PriceHistory.id))
+        ) or 0
+    return {
+        "api_key_configured": bool(settings.coingecko_api_key),
+        "coins_with_history": coins_with_history,
+        "last_backfilled": last_backfilled,
+        "total_rows": total_rows,
+    }
 
 
 def _round_optional(value: float | None) -> float | None:

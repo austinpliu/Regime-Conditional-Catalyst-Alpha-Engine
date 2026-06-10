@@ -16,6 +16,10 @@ class Settings(BaseModel):
     output_dir: Path = Field(default_factory=lambda: PROJECT_ROOT / "outputs")
     cmc_limit: int = Field(default=200, gt=0)
     ranking_window_days: int = Field(default=90, gt=0)
+    coingecko_base_url: str = "https://api.coingecko.com/api/v3"
+    coingecko_api_key: str = ""
+    coingecko_request_delay_seconds: float = 2.5
+    price_history_days: int = Field(default=120, gt=0)
 
 
 def _env_int(name: str, default: int) -> int:
@@ -23,6 +27,13 @@ def _env_int(name: str, default: int) -> int:
     if value is None or value.strip() == "":
         return default
     return int(value)
+
+
+def _env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return default
+    return float(value)
 
 
 def _env_path(name: str, default: Path) -> Path:
@@ -61,4 +72,8 @@ def get_settings() -> Settings:
         output_dir=_env_path("OUTPUT_DIR", PROJECT_ROOT / "outputs"),
         cmc_limit=_env_int("CMC_LIMIT", 200),
         ranking_window_days=_env_int("RANKING_WINDOW_DAYS", 90),
+        coingecko_base_url=os.getenv("COINGECKO_BASE_URL", "https://api.coingecko.com/api/v3").rstrip("/"),
+        coingecko_api_key=os.getenv("COINGECKO_API_KEY", ""),
+        coingecko_request_delay_seconds=_env_float("COINGECKO_REQUEST_DELAY_SECONDS", 2.5),
+        price_history_days=_env_int("PRICE_HISTORY_DAYS", 120),
     )
