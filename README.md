@@ -179,6 +179,17 @@ python scripts/seed_market_snapshots.py
 
 This script only runs when manually called. It does not require an API key and only inserts snapshots for BTC, ETH, and SOL if those symbols already exist in the local coin database.
 
+## Daily data refresh
+
+Keep price history current by running two commands each day:
+
+```bash
+python scripts/backfill_price_history.py --refresh   # pull last 3 days for all coins (~8 min)
+python scripts/add_catalyst.py                        # add any new upcoming events manually
+```
+
+If interrupted, re-run the same command — already-current coins are skipped automatically.
+
 ## Tests
 
 Run the scoring tests:
