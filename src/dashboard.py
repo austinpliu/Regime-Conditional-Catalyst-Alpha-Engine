@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import subprocess
-import sys
 from datetime import date, timedelta
 from html import escape
 from http import HTTPStatus
@@ -76,10 +74,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if parsed.path == "/export":
                 self._handle_export(form)
                 return
-            if parsed.path == "/backfill-history":
-                self._handle_backfill_history(form)
-                return
-
             self.send_error(HTTPStatus.NOT_FOUND, "Not found")
         except Exception as exc:
             self._redirect("/", notice=str(exc), notice_type="error")
@@ -145,16 +139,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
         days = int(form.get("days") or settings.ranking_window_days)
         output_path = export_ranked_catalysts(settings, days=days)
         self._redirect("/", notice=f"Exported ranked CSV to {output_path}.", notice_type="success")
-
-    def _handle_backfill_history(self, form: dict[str, str]) -> None:
-        mode = form.get("mode", "refresh")
-        script = Path(__file__).resolve().parents[1] / "scripts" / "backfill_price_history.py"
-        args = [sys.executable, str(script)]
-        if mode == "refresh":
-            args.append("--refresh")
-        subprocess.Popen(args, start_new_session=True)
-        label = "3-day refresh" if mode == "refresh" else "full backfill"
-        self._redirect("/", notice=f"Price history {label} started in background.", notice_type="success")
 
     def _send_download(self) -> None:
         settings = get_settings()
@@ -721,16 +705,6 @@ def render_coingecko_panel(status: dict[str, object]) -> str:
       <span>Last backfilled</span>
       <strong>{last_date}</strong>
     </div>
-  </div>
-  <div class="cg-actions">
-    <form method="post" action="/backfill-history" class="inline-form">
-      <input type="hidden" name="mode" value="refresh">
-      <button type="submit">&#8635; Refresh (3d)</button>
-    </form>
-    <form method="post" action="/backfill-history" class="inline-form">
-      <input type="hidden" name="mode" value="full">
-      <button type="submit" class="secondary">Full Backfill</button>
-    </form>
   </div>
 </section>"""
 
@@ -1950,21 +1924,6 @@ textarea:focus {
   font-weight: 700;
   color: var(--ink);
   letter-spacing: -0.01em;
-}
-
-.cg-actions {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.cg-actions .inline-form {
-  flex: 1;
-  min-width: 0;
-}
-
-.cg-actions button {
-  width: 100%;
 }
 
 /* ─── RESPONSIVE ─────────────────────────────────── */
