@@ -38,6 +38,7 @@ def init_db(database_url: str) -> Engine:
 
     import src.models.catalyst  # noqa: F401
     import src.models.coin  # noqa: F401
+    import src.models.market_snapshot  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
     return engine

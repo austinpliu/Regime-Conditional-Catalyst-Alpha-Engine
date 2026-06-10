@@ -4,6 +4,8 @@ Local MVP for researching upcoming crypto catalysts. It pulls a top-200 coin uni
 
 This project does not implement live trading, does not connect to Hyperliquid, and does not scrape X/Twitter or Reddit.
 
+MVP 2 adds a simple market reaction / priced-in estimator. Each CoinMarketCap coin update stores market snapshots, and catalyst rankings now include recent return metrics, relative performance, a priced-in penalty, and an adjusted score.
+
 ## Setup
 
 1. Create and activate a virtual environment:
@@ -122,6 +124,7 @@ The dashboard lets you:
 
 - update the CoinMarketCap coin universe
 - add catalysts from a form
+- edit upcoming catalysts
 - view ranked upcoming catalysts
 - export or download the ranked CSV
 
@@ -142,6 +145,14 @@ The CSV includes:
 - `source_url`
 - `confidence_score`
 - `catalyst_score`
+- `return_7d_pct`
+- `return_14d_pct`
+- `return_30d_pct`
+- `volume_change_pct`
+- `btc_relative_return_pct`
+- `eth_relative_return_pct`
+- `priced_in_penalty`
+- `adjusted_score`
 
 ## Scoring
 
@@ -153,6 +164,20 @@ Catalyst scores are normalized from 0 to 100 using:
 - confidence score
 
 Events closer to today receive a higher proximity component. Past events are not included in ranked output.
+
+## Priced-In Estimator
+
+Market snapshots are saved when the coin universe is updated. When enough historical snapshots exist, the estimator calculates recent 7-day, 14-day, and 30-day returns, volume change, and BTC/ETH-relative return. A simple `priced_in_penalty` is subtracted from the original `catalyst_score` to produce `adjusted_score`.
+
+The adjusted score is still a research ranking signal only. It is not a buy/sell signal.
+
+For local MVP 2 validation before you have 30 days of real snapshots, seed development-only BTC, ETH, and SOL snapshot history:
+
+```bash
+python scripts/seed_market_snapshots.py
+```
+
+This script only runs when manually called. It does not require an API key and only inserts snapshots for BTC, ETH, and SOL if those symbols already exist in the local coin database.
 
 ## Tests
 
