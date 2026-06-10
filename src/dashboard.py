@@ -602,6 +602,9 @@ def render_ranked_table(rows: list[dict[str, object]]) -> str:
   <td>{render_pct_colored(row["volume_change_pct"])}</td>
   <td>{render_pct_colored(row["btc_relative_return_pct"])}</td>
   <td>{render_pct_colored(row["eth_relative_return_pct"])}</td>
+  <td><span class="quant-cell">{format_pct(row.get("realized_vol_30d"))}</span></td>
+  <td>{render_pct_colored(row.get("ma_20d_distance_pct"))}</td>
+  <td><span class="quant-cell">{format_number(row.get("btc_correlation_30d"))}</span></td>
   <td><span class="score penalty">{format_number(row["priced_in_penalty"])}</span></td>
   <td><span class="score">{format_number(row["adjusted_score"])}</span></td>
   <td>{render_status_badge(row["adjusted_score"], row["priced_in_penalty"])}</td>
@@ -624,6 +627,9 @@ def render_ranked_table(rows: list[dict[str, object]]) -> str:
         <th>Vol Change</th>
         <th>vs BTC</th>
         <th>vs ETH</th>
+        <th>Vol 30d</th>
+        <th>MA Dist</th>
+        <th>BTC Corr</th>
         <th>Priced-In</th>
         <th>Adj. Score</th>
         <th>Status</th>
@@ -1528,6 +1534,14 @@ tbody tr:last-child td {
 
 .pct-neutral {
   color: var(--muted);
+}
+
+/* ─── QUANT CELLS ────────────────────────────────── */
+
+.quant-cell {
+  font-size: 0.78rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
 }
 
 /* ─── SCORE BADGES ───────────────────────────────── */

@@ -13,6 +13,7 @@ from src.data.cmc_client import CoinMarketCapClient, CoinMarketData
 from src.models.catalyst import Catalyst, CatalystCreate, EventType
 from src.models.coin import Coin
 from src.models.market_snapshot import MarketSnapshot
+from src.models.price_history import PriceHistory
 from src.scoring.catalyst_score import calculate_catalyst_score, days_until_event, estimate_source_credibility
 from src.scoring.market_reaction import (
     MarketSnapshotPoint,
@@ -20,6 +21,7 @@ from src.scoring.market_reaction import (
     calculate_market_reaction,
     calculate_priced_in_penalty,
 )
+from src.scoring.quant_metrics import PriceRow, calculate_quant_metrics
 from src.storage.db import init_db, session_scope
 
 
@@ -41,6 +43,11 @@ CSV_COLUMNS = [
     "eth_relative_return_pct",
     "priced_in_penalty",
     "adjusted_score",
+    "realized_vol_7d",
+    "realized_vol_30d",
+    "volume_z_score_30d",
+    "ma_20d_distance_pct",
+    "btc_correlation_30d",
 ]
 
 
@@ -377,6 +384,8 @@ def rank_catalyst_rows(settings: Settings, days: int | None = None) -> list[dict
         snapshot_cache: dict[str, list[MarketSnapshotPoint]] = {}
         btc_snapshots = _snapshot_points_for_symbol(session, "BTC", snapshot_cache)
         eth_snapshots = _snapshot_points_for_symbol(session, "ETH", snapshot_cache)
+        quant_cache: dict[str, list[PriceRow]] = {}
+        btc_price_rows = _price_history_rows_for_symbol(session, "BTC", quant_cache)
         rows = []
         for catalyst in catalysts:
             days_until = days_until_event(catalyst.event_date, as_of=today)
@@ -395,6 +404,8 @@ def rank_catalyst_rows(settings: Settings, days: int | None = None) -> list[dict
             )
             priced_in_penalty = calculate_priced_in_penalty(reaction, days_until_event=days_until)
             adjusted_score = adjusted_opportunity_score(catalyst_score, priced_in_penalty)
+            coin_price_rows = _price_history_rows_for_symbol(session, catalyst.coin.symbol, quant_cache)
+            quant = calculate_quant_metrics(coin_price_rows, btc_rows=btc_price_rows)
             rows.append(
                 {
                     "symbol": catalyst.coin.symbol,
@@ -415,6 +426,11 @@ def rank_catalyst_rows(settings: Settings, days: int | None = None) -> list[dict
                     "eth_relative_return_pct": _round_optional(reaction.eth_relative_return_pct),
                     "priced_in_penalty": priced_in_penalty,
                     "adjusted_score": adjusted_score,
+                    "realized_vol_7d": _round_optional(quant.realized_vol_7d),
+                    "realized_vol_30d": _round_optional(quant.realized_vol_30d),
+                    "volume_z_score_30d": _round_optional(quant.volume_z_score_30d),
+                    "ma_20d_distance_pct": _round_optional(quant.ma_20d_distance_pct),
+                    "btc_correlation_30d": _round_optional(quant.btc_correlation_30d),
                 }
             )
 
@@ -469,6 +485,29 @@ def _snapshot_points_for_symbol(
         for snapshot in snapshots
     ]
     snapshot_cache[normalized_symbol] = points
+    return points
+
+
+def _price_history_rows_for_symbol(
+    session,
+    symbol: str,
+    cache: dict[str, list[PriceRow]],
+) -> list[PriceRow]:
+    normalized = symbol.upper()
+    if normalized in cache:
+        return cache[normalized]
+
+    rows = session.execute(
+        select(PriceHistory)
+        .where(func.upper(PriceHistory.symbol) == normalized)
+        .order_by(PriceHistory.date)
+    ).scalars().all()
+
+    points = [
+        PriceRow(date=row.date, close_usd=row.close_usd, volume_usd=row.volume_usd)
+        for row in rows
+    ]
+    cache[normalized] = points
     return points
 
 
