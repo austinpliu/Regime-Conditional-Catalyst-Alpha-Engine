@@ -86,7 +86,7 @@ def test_dashboard_ranked_table_shows_mvp2_priced_in_columns(tmp_path, monkeypat
         "7D Return",
         "14D Return",
         "30D Return",
-        "Vol Change",
+        "VOL Z",
         "vs BTC",
         "vs ETH",
         "Priced-In",

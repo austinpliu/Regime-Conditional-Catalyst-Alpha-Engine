@@ -377,7 +377,7 @@ def render_market_overview(overview: dict[str, object]) -> str:
     <strong>{overview["tracked_coin_count"]}</strong>
   </article>
   <article>
-    <span>Last snapshot</span>
+    <span>Last updated</span>
     <strong>{format_timestamp(overview["latest_snapshot_timestamp"])}</strong>
   </article>
   <article>
@@ -606,7 +606,7 @@ def render_ranked_table(rows: list[dict[str, object]]) -> str:
   <td>{render_pct_colored(row["return_7d_pct"])}</td>
   <td>{render_pct_colored(row["return_14d_pct"])}</td>
   <td>{render_pct_colored(row["return_30d_pct"])}</td>
-  <td>{render_pct_colored(row["volume_change_pct"])}</td>
+  <td>{render_z_score(row.get("volume_z_score"))}</td>
   <td>{render_pct_colored(row["btc_relative_return_pct"])}</td>
   <td>{render_pct_colored(row["eth_relative_return_pct"])}</td>
   <td><span class="quant-cell">{format_pct(row.get("realized_vol_30d"))}</span></td>
@@ -631,7 +631,7 @@ def render_ranked_table(rows: list[dict[str, object]]) -> str:
         <th>7D Return</th>
         <th>14D Return</th>
         <th>30D Return</th>
-        <th>Vol Change</th>
+        <th>VOL Z</th>
         <th>vs BTC</th>
         <th>vs ETH</th>
         <th>Vol 30d</th>
@@ -664,7 +664,7 @@ def render_coin_list(coins: list[dict[str, object]]) -> str:
     <strong>{escape(str(coin["symbol"]))}</strong>
     <span>{escape(str(coin["name"]))}</span>
   </div>
-  <span class="coin-list-cap">{escape(format_usd(coin["market_cap_usd"]))}</span>
+  <span class="coin-list-cap">{escape(format_usd(coin["price_usd"]))}</span>
 </li>"""
         for coin in coins
     )
@@ -707,6 +707,18 @@ def render_coingecko_panel(status: dict[str, object]) -> str:
     </div>
   </div>
 </section>"""
+
+
+def render_z_score(value: object) -> str:
+    if value is None:
+        return '<span class="pct-neutral">N/A</span>'
+    try:
+        v = float(value)
+        css = "pct-positive" if v > 1 else "pct-negative" if v < -1 else "pct-neutral"
+        sign = "+" if v > 0 else ""
+        return f'<span class="{css}">{sign}{v:.2f}σ</span>'
+    except (TypeError, ValueError):
+        return '<span class="pct-neutral">N/A</span>'
 
 
 def render_pct_colored(value: object) -> str:

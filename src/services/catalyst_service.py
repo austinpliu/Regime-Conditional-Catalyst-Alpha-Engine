@@ -305,13 +305,30 @@ def top_coin_rows(settings: Settings, limit: int = 12) -> list[dict[str, object]
             .limit(limit)
         ).scalars().all()
 
+        symbols = [c.symbol.upper() for c in coins]
+        history_prices: dict[str, float | None] = {}
+        if symbols:
+            latest_date_sq = (
+                select(PriceHistory.symbol, func.max(PriceHistory.date).label("max_date"))
+                .where(PriceHistory.symbol.in_(symbols))
+                .group_by(PriceHistory.symbol)
+                .subquery()
+            )
+            for row in session.execute(
+                select(PriceHistory.symbol, PriceHistory.price_usd)
+                .join(latest_date_sq,
+                      (PriceHistory.symbol == latest_date_sq.c.symbol) &
+                      (PriceHistory.date == latest_date_sq.c.max_date))
+            ).all():
+                history_prices[row.symbol] = row.price_usd
+
         return [
             {
                 "symbol": coin.symbol,
                 "name": coin.name,
                 "rank": coin.cmc_rank,
                 "market_cap_usd": coin.market_cap_usd,
-                "price_usd": coin.price_usd,
+                "price_usd": history_prices.get(coin.symbol.upper()),
             }
             for coin in coins
         ]
@@ -322,21 +339,37 @@ def market_overview(settings: Settings) -> dict[str, object]:
 
     with session_scope(settings.database_url) as session:
         tracked_coin_count = session.scalar(select(func.count(Coin.id))) or 0
-        latest_snapshots = _latest_snapshots_by_symbol(session)
-        latest_timestamp = max((snapshot.timestamp for snapshot in latest_snapshots.values()), default=None)
-        total_market_cap = sum(snapshot.market_cap_usd or 0 for snapshot in latest_snapshots.values()) if latest_snapshots else None
-        total_volume = sum(snapshot.volume_24h_usd or 0 for snapshot in latest_snapshots.values()) if latest_snapshots else None
-        snapshot_cache: dict[str, list[MarketSnapshotPoint]] = {}
-        btc_reaction = calculate_market_reaction(_snapshot_points_for_symbol(session, "BTC", snapshot_cache))
-        eth_reaction = calculate_market_reaction(_snapshot_points_for_symbol(session, "ETH", snapshot_cache))
+
+        latest_date_sq = (
+            select(PriceHistory.symbol, func.max(PriceHistory.date).label("max_date"))
+            .group_by(PriceHistory.symbol)
+            .subquery()
+        )
+        latest_rows = session.execute(
+            select(PriceHistory)
+            .join(latest_date_sq,
+                  (PriceHistory.symbol == latest_date_sq.c.symbol) &
+                  (PriceHistory.date == latest_date_sq.c.max_date))
+        ).scalars().all()
+
+        latest_date = max((r.date for r in latest_rows), default=None)
+        total_market_cap = sum(r.market_cap_usd or 0 for r in latest_rows) if latest_rows else None
+        total_volume = sum(r.volume_24h_usd or 0 for r in latest_rows) if latest_rows else None
+
+        history_cache: dict[str, list[DailyPricePoint]] = {}
+        btc_history = _daily_price_points_for_symbol(session, "BTC", history_cache)
+        eth_history = _daily_price_points_for_symbol(session, "ETH", history_cache)
+
+    btc_metrics = calculate_market_reaction_from_history(btc_history)
+    eth_metrics = calculate_market_reaction_from_history(eth_history)
 
     return {
         "total_tracked_market_cap": total_market_cap,
         "total_tracked_volume_24h": total_volume,
         "tracked_coin_count": tracked_coin_count,
-        "latest_snapshot_timestamp": latest_timestamp.isoformat() if latest_timestamp else None,
-        "btc_return_7d_pct": _round_optional(btc_reaction.return_7d_pct),
-        "eth_return_7d_pct": _round_optional(eth_reaction.return_7d_pct),
+        "latest_snapshot_timestamp": latest_date.isoformat() if latest_date else None,
+        "btc_return_7d_pct": _round_optional(btc_metrics.return_7d_pct),
+        "eth_return_7d_pct": _round_optional(eth_metrics.return_7d_pct),
     }
 
 
@@ -344,47 +377,46 @@ def top_market_cap_snapshot_rows(settings: Settings, limit: int = 10) -> list[di
     ensure_database(settings)
 
     with session_scope(settings.database_url) as session:
-        latest_snapshots = _latest_snapshots_by_symbol(session)
-        ranked = sorted(
-            latest_snapshots.values(),
-            key=lambda snapshot: snapshot.market_cap_usd or 0,
-            reverse=True,
+        latest_date_sq = (
+            select(PriceHistory.symbol, func.max(PriceHistory.date).label("max_date"))
+            .group_by(PriceHistory.symbol)
+            .subquery()
         )
-        return [
-            {
-                "symbol": snapshot.symbol,
-                "market_cap_usd": snapshot.market_cap_usd,
-            }
-            for snapshot in ranked[:limit]
-        ]
+        rows = session.execute(
+            select(PriceHistory)
+            .join(latest_date_sq,
+                  (PriceHistory.symbol == latest_date_sq.c.symbol) &
+                  (PriceHistory.date == latest_date_sq.c.max_date))
+            .where(PriceHistory.market_cap_usd.is_not(None))
+            .order_by(PriceHistory.market_cap_usd.desc())
+            .limit(limit)
+        ).scalars().all()
+
+        return [{"symbol": r.symbol, "market_cap_usd": r.market_cap_usd} for r in rows]
 
 
 def market_timeseries(settings: Settings, limit_points: int = 48) -> list[dict[str, object]]:
     ensure_database(settings)
 
     with session_scope(settings.database_url) as session:
-        snapshots = session.execute(
-            select(MarketSnapshot).order_by(MarketSnapshot.timestamp)
-        ).scalars().all()
-
-        grouped: dict[str, dict[str, object]] = {}
-        for snapshot in snapshots:
-            timestamp_key = snapshot.timestamp.isoformat()
-            if timestamp_key not in grouped:
-                grouped[timestamp_key] = {
-                    "timestamp": timestamp_key,
-                    "total_market_cap": 0.0,
-                    "total_volume_24h": 0.0,
-                }
-
-            grouped[timestamp_key]["total_market_cap"] = float(grouped[timestamp_key]["total_market_cap"]) + (
-                snapshot.market_cap_usd or 0
+        rows = session.execute(
+            select(
+                PriceHistory.date,
+                func.sum(PriceHistory.market_cap_usd).label("total_market_cap"),
+                func.sum(PriceHistory.volume_24h_usd).label("total_volume_24h"),
             )
-            grouped[timestamp_key]["total_volume_24h"] = float(grouped[timestamp_key]["total_volume_24h"]) + (
-                snapshot.volume_24h_usd or 0
-            )
+            .group_by(PriceHistory.date)
+            .order_by(PriceHistory.date)
+        ).all()
 
-    return list(grouped.values())[-limit_points:]
+    return [
+        {
+            "timestamp": row.date.isoformat(),
+            "total_market_cap": float(row.total_market_cap or 0),
+            "total_volume_24h": float(row.total_volume_24h or 0),
+        }
+        for row in rows
+    ][-limit_points:]
 
 
 def rank_catalyst_rows(settings: Settings, days: int | None = None) -> list[dict[str, object]]:
